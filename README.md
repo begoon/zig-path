@@ -11,22 +11,25 @@ A CLI tool that displays your PATH directories with color coding, file counts, a
 
 ## Install
 
-### Homebrew
+### Homebrew (macOS)
 
 ```sh
 brew tap begoon/tap
 brew install paths
 ```
 
+Prebuilt binaries for Apple Silicon and Intel Macs are published automatically
+via GitHub Releases — no Zig toolchain required.
+
 ### From source
 
 Requires [Zig](https://ziglang.org/) 0.16+.
 
 ```sh
-zig build -Doptimize=ReleaseFast
+zig build
 ```
 
-The binary is installed to `zig-out/bin/paths`.
+The binary is installed to `~/bin/paths` (default) or `zig-out/bin/paths` with `--prefix zig-out`.
 
 ## Usage
 
@@ -49,6 +52,16 @@ Prints each unique PATH directory with color coding and file counts:
 /usr/local/bin (128)
 /usr/bin (983)
 ```
+
+### Configuration
+
+Custom "special prefixes" (shown in blue) can be set in `~/.paths.json`:
+
+```json
+{"special_prefixes": ["/opt/homebrew", "/usr/local"]}
+```
+
+If the file is missing, defaults are used: `/opt/homebrew`, `/opt/workbrew`, `/opt/zerobrew`.
 
 ### Interactive mode (`-i`)
 

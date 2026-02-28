@@ -13,6 +13,18 @@ just               # runs test then build
 
 Requires Zig 0.16.0-dev (uses the new `std.process.Init` main signature and `std.Io` abstraction).
 
+## CI / Release
+
+GitHub Actions workflow (`.github/workflows/release.yml`) runs on push to `main`:
+
+- Uses `mlugg/setup-zig@v2` to install Zig 0.16-dev
+- Runs tests, cross-compiles for `aarch64-macos` and `x86_64-macos`
+- Publishes prebuilt binaries as a rolling `latest` GitHub Release
+- Formula (`Formula/paths.rb`) downloads prebuilt binaries — no Zig dependency for Homebrew users
+
+When updating the Zig version in the workflow, also update `build.zig` compatibility if needed.
+After each release, update SHA256 checksums in `Formula/paths.rb` for the tap repo.
+
 ## Architecture
 
 Single file: `main.zig`. No external dependencies.

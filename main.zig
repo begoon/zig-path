@@ -1,12 +1,54 @@
 const std = @import("std");
 const Io = std.Io;
 const posix = std.posix;
+const build_options = @import("build_options");
 
-const special_prefixes = [_][]const u8{
+const PROGRAM_NAME = "paths";
+
+const default_special_prefixes = [_][]const u8{
     "/opt/homebrew",
     "/opt/workbrew",
     "/opt/zerobrew",
+    "/usr/local",
 };
+
+const CONFIG_FILE = ".paths.json";
+
+const LoadConfigResult = union(enum) {
+    not_found,
+    err,
+    ok: []const []const u8,
+};
+
+fn loadConfig(gpa: std.mem.Allocator, home: []const u8, io: Io) LoadConfigResult {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const config_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ home, CONFIG_FILE }) catch return .not_found;
+
+    const file = Io.Dir.openDirAbsolute(io, home, .{}) catch return .not_found;
+    var dir = file;
+    defer dir.close(io);
+
+    const data = dir.readFileAlloc(io, CONFIG_FILE, gpa, Io.Limit.limited(64 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return .not_found,
+        else => {
+            var stderr_buf: [512]u8 = undefined;
+            var stderr_w: Io.File.Writer = .init(.stderr(), io, &stderr_buf);
+            stderr_w.interface.print("error: cannot read {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
+            stderr_w.interface.flush() catch {};
+            return .err;
+        },
+    };
+
+    const parsed = std.json.parseFromSlice(struct { special_prefixes: []const []const u8 }, gpa, data, .{}) catch {
+        var stderr_buf: [512]u8 = undefined;
+        var stderr_w: Io.File.Writer = .init(.stderr(), io, &stderr_buf);
+        stderr_w.interface.print("error: invalid JSON in {s}\n", .{config_path}) catch {};
+        stderr_w.interface.flush() catch {};
+        return .err;
+    };
+
+    return .{ .ok = parsed.value.special_prefixes };
+}
 
 // ANSI escape codes
 const RESET = "\x1b[0m";
@@ -25,8 +67,8 @@ const CURSOR_HOME = "\x1b[H";
 
 /// Returns the length of a matching special prefix, or null if none match.
 /// Only matches at path boundaries (exact match or followed by '/').
-pub fn findSpecialPrefix(path: []const u8) ?usize {
-    for (special_prefixes) |prefix| {
+pub fn findSpecialPrefix(path: []const u8, prefixes: []const []const u8) ?usize {
+    for (prefixes) |prefix| {
         if (path.len >= prefix.len and
             std.mem.eql(u8, path[0..prefix.len], prefix) and
             (path.len == prefix.len or path[prefix.len] == '/'))
@@ -68,7 +110,7 @@ fn countEntries(io: Io, path: []const u8) struct { count: usize, exists: bool } 
     return .{ .count = count, .exists = true };
 }
 
-fn printEntry(writer: anytype, io: Io, path: []const u8, home: []const u8) !void {
+fn printEntry(writer: anytype, io: Io, path: []const u8, home: []const u8, prefixes: []const []const u8) !void {
     const info = countEntries(io, path);
     const shortened = shortenHome(path, home);
 
@@ -87,7 +129,7 @@ fn printEntry(writer: anytype, io: Io, path: []const u8, home: []const u8) !void
         try writer.writeAll(YELLOW ++ "~");
         try writer.writeAll(shortened.suffix);
         try writer.writeAll(RESET);
-    } else if (findSpecialPrefix(path)) |prefix_len| {
+    } else if (findSpecialPrefix(path, prefixes)) |prefix_len| {
         try writer.writeAll(BLUE);
         try writer.writeAll(path[0..prefix_len]);
         try writer.writeAll(RESET);
@@ -165,6 +207,7 @@ fn renderList(
     scroll_offset: usize,
     visible_count: usize,
     io: Io,
+    prefixes: []const []const u8,
 ) void {
     writeAll(CURSOR_HOME);
 
@@ -194,7 +237,7 @@ fn renderList(
                 writeAll("~");
                 writeAll(shortened.suffix);
                 if (idx != selected) writeAll(RESET);
-            } else if (findSpecialPrefix(path)) |prefix_len| {
+            } else if (findSpecialPrefix(path, prefixes)) |prefix_len| {
                 if (idx != selected) writeAll(BLUE);
                 writeAll(path[0..prefix_len]);
                 if (idx != selected) writeAll(RESET);
@@ -228,9 +271,9 @@ fn runLs(path: []const u8, io: Io) void {
     _ = child.wait(io) catch {};
 }
 
-fn interactiveMode(paths: []const []const u8, home: []const u8, io: Io) void {
+fn interactiveMode(paths: []const []const u8, home: []const u8, io: Io, prefixes: []const []const u8) void {
     if (paths.len == 0) {
-        writeAll("No paths found in PATH.\n");
+        writeAll("no " ++ PROGRAM_NAME ++ " found in PATH\n");
         return;
     }
 
@@ -247,7 +290,7 @@ fn interactiveMode(paths: []const []const u8, home: []const u8, io: Io) void {
     var scroll_offset: usize = 0;
 
     while (true) {
-        renderList(paths, home, selected, scroll_offset, visible_count, io);
+        renderList(paths, home, selected, scroll_offset, visible_count, io, prefixes);
 
         switch (readKey()) {
             .up => {
@@ -301,21 +344,50 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    // Check for -i flag
     var interactive = false;
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     _ = args_iter.skip(); // skip program name
+
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-i")) {
             interactive = true;
-            break;
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
+            var stdout_buf: [256]u8 = undefined;
+            var stdout_w: Io.File.Writer = .init(.stdout(), io, &stdout_buf);
+            try stdout_w.interface.writeAll(PROGRAM_NAME ++ " " ++ build_options.version ++ "\n");
+            try stdout_w.interface.flush();
+            return;
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            var stdout_buf: [512]u8 = undefined;
+            var stdout_w: Io.File.Writer = .init(.stdout(), io, &stdout_buf);
+            try stdout_w.interface.writeAll(
+                "usage: " ++ PROGRAM_NAME ++ " [options]\n" ++
+                    "\n" ++
+                    "display PATH directories with colors and file counts\n" ++
+                    "\n" ++
+                    "options:\n" ++
+                    "  -i             interactive mode\n" ++
+                    "  -v, --version  print version\n" ++
+                    "  -h, --help     print this help\n" ++
+                    "\n" ++
+                    "config: ~/.paths.json\n" ++
+                    "  {\"special_prefixes\": [\"/opt/homebrew\", \"/usr/local\"]}\n",
+            );
+            try stdout_w.interface.flush();
+            return;
         }
     }
+
+    const prefixes: []const []const u8 = switch (loadConfig(gpa, home, io)) {
+        .not_found => &default_special_prefixes,
+        .err => return error.InvalidConfig,
+        .ok => |p| p,
+    };
 
     if (interactive) {
         var paths = try collectPaths(gpa, path_env);
         defer paths.deinit(gpa);
-        interactiveMode(paths.items, home, io);
+        interactiveMode(paths.items, home, io, prefixes);
         return;
     }
 
@@ -331,26 +403,28 @@ pub fn main(init: std.process.Init) !void {
         if (dir_path.len == 0) continue;
         const result = seen.getOrPut(dir_path) catch continue;
         if (result.found_existing) continue;
-        try printEntry(w, io, dir_path, home);
+        try printEntry(w, io, dir_path, home, prefixes);
     }
 
     try w.flush();
 }
 
 test "findSpecialPrefix detects known prefixes" {
-    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/homebrew/bin"));
-    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/homebrew/sbin"));
-    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/homebrew"));
-    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/workbrew/bin"));
-    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/zerobrew/prefix/bin"));
+    const prefixes = &default_special_prefixes;
+    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/homebrew/bin", prefixes));
+    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/homebrew/sbin", prefixes));
+    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/homebrew", prefixes));
+    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/workbrew/bin", prefixes));
+    try std.testing.expectEqual(@as(?usize, 13), findSpecialPrefix("/opt/zerobrew/prefix/bin", prefixes));
 }
 
 test "findSpecialPrefix rejects non-matching paths" {
-    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix("/usr/bin"));
-    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix("/opt/homebrewery"));
-    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix("/opt/homebrew2/bin"));
-    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix(""));
-    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix("/opt/pmk/env/global/bin"));
+    const prefixes = &default_special_prefixes;
+    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix("/usr/bin", prefixes));
+    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix("/opt/homebrewery", prefixes));
+    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix("/opt/homebrew2/bin", prefixes));
+    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix("", prefixes));
+    try std.testing.expectEqual(@as(?usize, null), findSpecialPrefix("/opt/pmk/env/global/bin", prefixes));
 }
 
 test "shortenHome replaces home prefix with suffix" {
