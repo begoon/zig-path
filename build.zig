@@ -16,7 +16,8 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    if (b.graph.environ_map.get("HOMEBREW_FORMULA_PREFIX") == null) {
+    const is_default_prefix = std.mem.eql(u8, b.install_prefix, "zig-out");
+    if (b.graph.environ_map.get("HOMEBREW_FORMULA_PREFIX") == null and is_default_prefix) {
         const home = b.graph.environ_map.get("HOME") orelse @panic("HOME not set");
         const dest = b.fmt("{s}/bin/{s}", .{ home, name });
         const cp = b.addSystemCommand(&.{ "cp", "-f" });
