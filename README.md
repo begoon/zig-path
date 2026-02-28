@@ -67,6 +67,14 @@ If the file is missing, defaults are used: `/opt/homebrew`, `/opt/workbrew`, `/o
 
 A fullscreen TUI selector. Navigate with arrow keys or `j`/`k`, press `Enter` to run `ls -al <path> | less`, and `q` or `Esc` to quit.
 
+### Re-tap
+
+```sh
+brew untap begoon/tap
+brew tap begoon/tap
+brew install paths
+```
+
 ## License
 
 [MIT](LICENSE)
