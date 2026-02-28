@@ -1,0 +1,45 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0-dev.188+640ac6d1e
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Build aarch64-macos
+        run: zig build -Dtarget=aarch64-macos --prefix zig-out/aarch64-macos
+
+      - name: Build x86_64-macos
+        run: zig build -Dtarget=x86_64-macos --prefix zig-out/x86_64-macos
+
+      - name: Package binaries
+        run: |
+          tar -czf paths-macos-arm64.tar.gz -C zig-out/aarch64-macos/bin paths
+          tar -czf paths-macos-x86_64.tar.gz -C zig-out/x86_64-macos/bin paths
+
+      - name: Delete existing latest release
+        run: gh release delete latest --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release
+        run: |
+          gh release create latest \
+            paths-macos-arm64.tar.gz \
+            paths-macos-x86_64.tar.gz \
+            --title "Latest Build" \
+            --notes "Automated build from main branch" \
+            --latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
