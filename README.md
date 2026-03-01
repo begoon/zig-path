@@ -39,6 +39,15 @@ paths
 
 # Interactive mode — browse and inspect directories
 paths -i
+
+# Show duplicate PATH entries (marked with 🔄)
+paths -d
+
+# Interactive mode with duplicates shown
+paths -i -d
+
+# Show executables found in multiple PATH directories
+paths -s
 ```
 
 ### Default mode
@@ -52,6 +61,14 @@ Prints each unique PATH directory with color coding and file counts:
 /usr/local/bin (128)
 /usr/bin (983)
 ```
+
+### Duplicate mode (`-d`, `--duplicate`)
+
+Disables duplicate suppression. The first occurrence of a directory is printed normally; subsequent occurrences are shown with a 🔄 marker. Works in both default and interactive (`-i -d`) modes.
+
+### Shadow mode (`-s`, `--shadow`)
+
+Lists executables that exist in multiple PATH directories, showing which directories contain each one. Executable names are shown in light red, directory paths use the same color scheme as the default output.
 
 ### Configuration
 

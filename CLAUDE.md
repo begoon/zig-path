@@ -29,22 +29,26 @@ After each release, update SHA256 checksums in `Formula/paths.rb` for the tap re
 
 Single file: `main.zig`. No external dependencies.
 
-### Two modes
+### Modes
 
 - **Default mode**: prints all unique PATH entries to stdout with color and file counts
 - **Interactive mode** (`-i` flag): fullscreen TUI selector with scrolling, runs `ls -al <path> | less` on Enter
+- **Duplicate mode** (`-d`/`--duplicate` flag): disables duplicate suppression, marks repeated entries with 🔄. Works in both default and interactive modes.
+- **Shadow mode** (`-s`/`--shadow` flag): lists executables found in multiple PATH directories, with right-aligned names in light red and colored directory paths
 
 ### Key functions
 
-- `main()` — entry point, parses `-i` flag via `std.process.Args.Iterator.init(init.minimal.args)`
-- `printEntry()` — prints a single PATH entry with colors (used in default mode)
+- `main()` — entry point, parses flags via `std.process.Args.Iterator.init(init.minimal.args)`
+- `printEntry()` — prints a single PATH entry with colors and optional duplicate marker (used in default mode)
 - `renderList()` — draws the interactive list with ANSI codes (used in interactive mode)
 - `interactiveMode()` — main loop: raw terminal mode, keypress handling, scrolling
+- `shadowMode()` — scans all PATH dirs for executables, finds duplicates across dirs, prints formatted output
+- `writeColoredPath()` — writes a path with appropriate color (shared by shadow mode output)
+- `collectPaths()` — splits PATH, optionally deduplicates, returns paths and duplicate flags
 - `runLs()` — spawns `sh -c "ls -al '<path>' | less"` via `std.process.spawn()`
 - `countEntries()` — counts non-directory entries in a path (shows file count next to each entry)
 - `findSpecialPrefix()` — matches paths starting with /opt/homebrew, /opt/workbrew, /opt/zerobrew
 - `shortenHome()` — replaces $HOME prefix with `~`
-- `collectPaths()` — splits PATH, deduplicates, collects into ArrayList
 - `detectTerminalHeight()` — gets terminal rows via `ioctl` with `TIOCGWINSZ`
 - `readKey()` — reads stdin and classifies keypresses (up/down/enter/quit/other)
 
@@ -53,6 +57,7 @@ Single file: `main.zig`. No external dependencies.
 - Yellow: paths under $HOME (entire path colored)
 - Blue: special prefix portion (/opt/homebrew etc), rest in default color
 - White + strikethrough: non-existent directories (with cross mark)
+- Light red: executable names in shadow mode
 - Dim: file count suffix `(N)`
 - Reverse + bold: selected item in interactive mode
 

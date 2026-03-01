@@ -54,6 +54,7 @@ fn loadConfig(gpa: std.mem.Allocator, home: []const u8, io: Io) LoadConfigResult
 const RESET = "\x1b[0m";
 const BLUE = "\x1b[34m";
 const YELLOW = "\x1b[33m";
+const LIGHT_RED = "\x1b[91m";
 const WHITE = "\x1b[97m";
 const DIM = "\x1b[2m";
 const STRIKE = "\x1b[9m";
@@ -97,11 +98,10 @@ fn countEntries(io: Io, path: []const u8) struct { count: usize, exists: bool } 
     else
         Io.Dir.cwd().openDir(io, path, .{ .iterate = true })) catch
         return .{ .count = 0, .exists = false };
-    var d = dir;
-    defer d.close(io);
+    defer dir.close(io);
 
     var count: usize = 0;
-    var iter = d.iterate();
+    var iter = dir.iterate();
     while (iter.next(io) catch null) |entry| {
         if (entry.kind != .directory) {
             count += 1;
@@ -110,7 +110,7 @@ fn countEntries(io: Io, path: []const u8) struct { count: usize, exists: bool } 
     return .{ .count = count, .exists = true };
 }
 
-fn printEntry(writer: anytype, io: Io, path: []const u8, home: []const u8, prefixes: []const []const u8) !void {
+fn printEntry(writer: anytype, io: Io, path: []const u8, home: []const u8, prefixes: []const []const u8, is_duplicate: bool) !void {
     const info = countEntries(io, path);
     const shortened = shortenHome(path, home);
 
@@ -138,13 +138,17 @@ fn printEntry(writer: anytype, io: Io, path: []const u8, home: []const u8, prefi
         try writer.writeAll(path);
     }
 
-    try writer.print(DIM ++ " ({d})" ++ RESET ++ "\n", .{info.count});
+    try writer.print(DIM ++ " ({d})" ++ RESET, .{info.count});
+    if (is_duplicate) {
+        try writer.writeAll(" \xf0\x9f\x94\x84");
+    }
+    try writer.writeAll("\n");
 }
 
 fn detectTerminalHeight() u16 {
     var wsz: posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
-    const r = std.c.ioctl(std.posix.STDOUT_FILENO, std.posix.T.IOCGWINSZ, @intFromPtr(&wsz));
-    if (r == 0) return wsz.row;
+    const rc = std.c.ioctl(std.posix.STDOUT_FILENO, std.posix.T.IOCGWINSZ, @intFromPtr(&wsz));
+    if (rc == 0) return wsz.row;
     return 24;
 }
 
@@ -175,8 +179,8 @@ fn writeAll(buf: []const u8) void {
 
 fn writeFmt(comptime fmt: []const u8, args: anytype) void {
     var buf: [256]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writeAll(s);
+    const v = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    writeAll(v);
 }
 
 fn readKey() enum { up, down, enter, quit, other } {
@@ -202,6 +206,7 @@ fn readKey() enum { up, down, enter, quit, other } {
 
 fn renderList(
     paths: []const []const u8,
+    duplicates: []const bool,
     home: []const u8,
     selected: usize,
     scroll_offset: usize,
@@ -212,14 +217,14 @@ fn renderList(
     writeAll(CURSOR_HOME);
 
     for (0..visible_count) |i| {
-        const idx = scroll_offset + i;
+        const index = scroll_offset + i;
         writeAll(CLEAR_LINE);
-        if (idx < paths.len) {
-            const path = paths[idx];
+        if (index < paths.len) {
+            const path = paths[index];
             const info = countEntries(io, path);
             const shortened = shortenHome(path, home);
 
-            if (idx == selected) {
+            if (index == selected) {
                 writeAll(REVERSE ++ BOLD);
             }
 
@@ -233,21 +238,24 @@ fn renderList(
                 }
                 writeAll(" \xe2\x9d\x8c");
             } else if (shortened.is_home) {
-                if (idx != selected) writeAll(YELLOW);
+                if (index != selected) writeAll(YELLOW);
                 writeAll("~");
                 writeAll(shortened.suffix);
-                if (idx != selected) writeAll(RESET);
+                if (index != selected) writeAll(RESET);
             } else if (findSpecialPrefix(path, prefixes)) |prefix_len| {
-                if (idx != selected) writeAll(BLUE);
+                if (index != selected) writeAll(BLUE);
                 writeAll(path[0..prefix_len]);
-                if (idx != selected) writeAll(RESET);
+                if (index != selected) writeAll(RESET);
                 writeAll(path[prefix_len..]);
             } else {
                 writeAll(path);
             }
 
             writeFmt(DIM ++ " ({d})" ++ RESET, .{info.count});
-            if (idx == selected) {
+            if (duplicates.len > 0 and index < duplicates.len and duplicates[index]) {
+                writeAll(" \xf0\x9f\x94\x84");
+            }
+            if (index == selected) {
                 writeAll(RESET);
             }
         }
@@ -262,8 +270,8 @@ fn renderList(
 fn runLs(path: []const u8, io: Io) void {
     writeAll(CLEAR_SCREEN ++ CURSOR_HOME ++ SHOW_CURSOR);
 
-    var cmd_buf: [4096]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "ls -al '{s}' | less", .{path}) catch return;
+    var buf: [4096]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&buf, "ls -al '{s}' | less", .{path}) catch return;
 
     var child = std.process.spawn(io, .{
         .argv = &.{ "sh", "-c", cmd },
@@ -271,14 +279,14 @@ fn runLs(path: []const u8, io: Io) void {
     _ = child.wait(io) catch {};
 }
 
-fn interactiveMode(paths: []const []const u8, home: []const u8, io: Io, prefixes: []const []const u8) void {
+fn interactiveMode(paths: []const []const u8, duplicates: []const bool, home: []const u8, io: Io, prefixes: []const []const u8) void {
     if (paths.len == 0) {
         writeAll("no " ++ PROGRAM_NAME ++ " found in PATH\n");
         return;
     }
 
-    const term_height = detectTerminalHeight();
-    const visible_count: usize = @min(paths.len, @as(usize, term_height) -| 2);
+    const height = detectTerminalHeight();
+    const visible_count: usize = @min(paths.len, @as(usize, height) -| 2);
 
     const orig_termios = enableRawMode();
     defer disableRawMode(orig_termios);
@@ -290,7 +298,7 @@ fn interactiveMode(paths: []const []const u8, home: []const u8, io: Io, prefixes
     var scroll_offset: usize = 0;
 
     while (true) {
-        renderList(paths, home, selected, scroll_offset, visible_count, io, prefixes);
+        renderList(paths, duplicates, home, selected, scroll_offset, visible_count, io, prefixes);
 
         switch (readKey()) {
             .up => {
@@ -321,19 +329,156 @@ fn interactiveMode(paths: []const []const u8, home: []const u8, io: Io, prefixes
     }
 }
 
-fn collectPaths(gpa: std.mem.Allocator, path_env: []const u8) !std.ArrayList([]const u8) {
-    var paths: std.ArrayList([]const u8) = .empty;
+fn writeColoredPath(writer: anytype, path: []const u8, home: []const u8, prefixes: []const []const u8) !void {
+    const shortened = shortenHome(path, home);
+    if (shortened.is_home) {
+        try writer.writeAll(YELLOW ++ "~");
+        try writer.writeAll(shortened.suffix);
+        try writer.writeAll(RESET);
+    } else if (findSpecialPrefix(path, prefixes)) |prefix_len| {
+        try writer.writeAll(BLUE);
+        try writer.writeAll(path[0..prefix_len]);
+        try writer.writeAll(RESET);
+        try writer.writeAll(path[prefix_len..]);
+    } else {
+        try writer.writeAll(path);
+    }
+}
+
+fn shadowMode(gpa: std.mem.Allocator, paths: []const []const u8, home: []const u8, io: Io, prefixes: []const []const u8) !void {
+    // map from executable name -> list of directory paths containing it
+    var exe_map = std.StringHashMap(std.ArrayList([]const u8)).init(gpa);
+    defer {
+        var it = exe_map.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(gpa);
+        }
+        exe_map.deinit();
+    }
+
+    // scan each PATH directory for executables
+    for (paths) |dir_path| {
+        const dir = (if (std.fs.path.isAbsolute(dir_path))
+            Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true })
+        else
+            Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true })) catch continue;
+        defer dir.close(io);
+
+        var iter = dir.iterate();
+        while (iter.next(io) catch null) |entry| {
+            if (entry.kind == .directory) continue;
+            // check if file is executable
+            const stat = dir.statFile(io, entry.name, .{}) catch continue;
+            if (stat.permissions.toMode() & 0o111 == 0) continue;
+            const name_dupe = gpa.dupe(u8, entry.name) catch continue;
+            const value = exe_map.getOrPut(name_dupe) catch {
+                gpa.free(name_dupe);
+                continue;
+            };
+            if (!value.found_existing) {
+                value.value_ptr.* = .empty;
+            } else {
+                gpa.free(name_dupe);
+            }
+            // only add if this dir_path isn't already in the list
+            var already = false;
+            for (value.value_ptr.items) |existing| {
+                if (std.mem.eql(u8, existing, dir_path)) {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already) {
+                value.value_ptr.append(gpa, dir_path) catch continue;
+            }
+        }
+    }
+
+    const Shadow = struct { name: []const u8, dirs: []const []const u8 };
+
+    // collect only executables that appear in multiple paths
+    var shadows: std.ArrayList(Shadow) = .empty;
+    defer shadows.deinit(gpa);
+
+    var it = exe_map.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.items.len > 1) {
+            try shadows.append(gpa, .{ .name = entry.key_ptr.*, .dirs = entry.value_ptr.items });
+        }
+    }
+
+    if (shadows.items.len == 0) return;
+
+    // sort by name
+    std.mem.sort(Shadow, shadows.items, {}, struct {
+        fn lessThan(_: void, a: Shadow, b: Shadow) bool {
+            return std.mem.order(u8, a.name, b.name) == .lt;
+        }
+    }.lessThan);
+
+    // find max name length for padding
+    var max_name_len: usize = 0;
+    for (shadows.items) |s| {
+        if (s.name.len > max_name_len) max_name_len = s.name.len;
+    }
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    const w = &stdout_file_writer.interface;
+
+    for (shadows.items) |v| {
+        // right-align the name with padding
+        const padding = max_name_len - v.name.len;
+        for (0..padding) |_| {
+            try w.writeAll(" ");
+        }
+        try w.writeAll(LIGHT_RED);
+        try w.writeAll(v.name);
+        try w.writeAll(RESET);
+        try w.writeAll(" ");
+
+        for (v.dirs, 0..) |dir_path, j| {
+            if (j > 0) try w.writeAll(", ");
+            try writeColoredPath(w, dir_path, home, prefixes);
+        }
+        try w.writeAll("\n");
+    }
+
+    try w.flush();
+}
+
+const CollectedPaths = struct {
+    paths: std.ArrayList([]const u8),
+    duplicates: std.ArrayList(bool),
+
+    fn deinit(self: *CollectedPaths, gpa: std.mem.Allocator) void {
+        self.paths.deinit(gpa);
+        self.duplicates.deinit(gpa);
+    }
+};
+
+fn collectPaths(gpa: std.mem.Allocator, path_env: []const u8, include_duplicates: bool) !CollectedPaths {
+    var result: CollectedPaths = .{
+        .paths = .empty,
+        .duplicates = .empty,
+    };
     var seen = std.StringHashMap(void).init(gpa);
     defer seen.deinit();
 
     var iter = std.mem.splitScalar(u8, path_env, ':');
     while (iter.next()) |dir_path| {
         if (dir_path.len == 0) continue;
-        const result = seen.getOrPut(dir_path) catch continue;
-        if (result.found_existing) continue;
-        try paths.append(gpa, dir_path);
+        const gop = seen.getOrPut(dir_path) catch continue;
+        if (gop.found_existing) {
+            if (!include_duplicates) continue;
+            try result.paths.append(gpa, dir_path);
+            try result.duplicates.append(gpa, true);
+        } else {
+            try result.paths.append(gpa, dir_path);
+            try result.duplicates.append(gpa, false);
+        }
     }
-    return paths;
+    return result;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -345,12 +490,18 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
 
     var interactive = false;
+    var shadow = false;
+    var show_duplicates = false;
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     _ = args_iter.skip(); // skip program name
 
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-i")) {
             interactive = true;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--shadow")) {
+            shadow = true;
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--duplicate")) {
+            show_duplicates = true;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
             var stdout_buf: [256]u8 = undefined;
             var stdout_w: Io.File.Writer = .init(.stdout(), io, &stdout_buf);
@@ -358,22 +509,25 @@ pub fn main(init: std.process.Init) !void {
             try stdout_w.interface.flush();
             return;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            var stdout_buf: [512]u8 = undefined;
-            var stdout_w: Io.File.Writer = .init(.stdout(), io, &stdout_buf);
-            try stdout_w.interface.writeAll(
-                "usage: " ++ PROGRAM_NAME ++ " [options]\n" ++
-                    "\n" ++
-                    "display PATH directories with colors and file counts\n" ++
-                    "\n" ++
-                    "options:\n" ++
-                    "  -i             interactive mode\n" ++
-                    "  -v, --version  print version\n" ++
-                    "  -h, --help     print this help\n" ++
-                    "\n" ++
-                    "config: ~/.paths.json\n" ++
-                    "  {\"special_prefixes\": [\"/opt/homebrew\", \"/usr/local\"]}\n",
+            var buf: [512]u8 = undefined;
+            var writer: Io.File.Writer = .init(.stdout(), io, &buf);
+            try writer.interface.writeAll("usage: " ++ PROGRAM_NAME ++
+                \\ [options]
+                \\
+                \\display PATH directories with colors and file counts
+                \\
+                \\options:
+                \\  -i              interactive mode
+                \\  -d, --duplicate show duplicate PATH entries
+                \\  -s, --shadow    show executables found in multiple paths
+                \\  -v, --version   print version
+                \\  -h, --help      print this help
+                \\
+                \\config: ~/.paths.json
+                \\  {"special_prefixes": ["/opt/homebrew", "/usr/local"]}
+                \\
             );
-            try stdout_w.interface.flush();
+            try writer.interface.flush();
             return;
         }
     }
@@ -385,15 +539,22 @@ pub fn main(init: std.process.Init) !void {
     };
 
     if (interactive) {
-        var paths = try collectPaths(gpa, path_env);
-        defer paths.deinit(gpa);
-        interactiveMode(paths.items, home, io, prefixes);
+        var collected = try collectPaths(gpa, path_env, show_duplicates);
+        defer collected.deinit(gpa);
+        interactiveMode(collected.paths.items, collected.duplicates.items, home, io, prefixes);
+        return;
+    }
+
+    if (shadow) {
+        var collected = try collectPaths(gpa, path_env, false);
+        defer collected.deinit(gpa);
+        try shadowMode(gpa, collected.paths.items, home, io, prefixes);
         return;
     }
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const w = &stdout_file_writer.interface;
+    const writer = &stdout_file_writer.interface;
 
     var seen = std.StringHashMap(void).init(gpa);
     defer seen.deinit();
@@ -402,11 +563,15 @@ pub fn main(init: std.process.Init) !void {
     while (iter.next()) |dir_path| {
         if (dir_path.len == 0) continue;
         const result = seen.getOrPut(dir_path) catch continue;
-        if (result.found_existing) continue;
-        try printEntry(w, io, dir_path, home, prefixes);
+        if (result.found_existing) {
+            if (!show_duplicates) continue;
+            try printEntry(writer, io, dir_path, home, prefixes, true);
+        } else {
+            try printEntry(writer, io, dir_path, home, prefixes, false);
+        }
     }
 
-    try w.flush();
+    try writer.flush();
 }
 
 test "findSpecialPrefix detects known prefixes" {
